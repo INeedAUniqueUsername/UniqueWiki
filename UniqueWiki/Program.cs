@@ -3,6 +3,7 @@ using SadConsole;
 using SadConsole.Input;
 using SadConsole.UI.Controls;
 using SadRogue.Primitives;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using static SadConsole.ColoredString;
@@ -14,6 +15,15 @@ Game.Instance.OnStart = () => {
 };
 Game.Instance.Run();
 
+public static class Common {
+    public static string GetSHA256(this string text) {
+        if (string.IsNullOrEmpty(text))
+            return string.Empty;
+        using (var sha = SHA256.Create()) {
+            return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(text))).Replace("-", "");
+        }
+    }
+}
 class EditorScreen : SadConsole.Console {
     public string currentFile;
     public Dictionary<string, TextEditor> editors=new();
@@ -21,7 +31,6 @@ class EditorScreen : SadConsole.Console {
         ResetUI();
     }
     public void SetFile(string file) {
-
         if (!File.Exists(file)) {
             return;
         }
@@ -80,10 +89,10 @@ class NavMenu : SadConsole.Console {
     public override void Render(TimeSpan delta) {
         this.Clear();
         var y = 0;
-        foreach(var f in main.editors.Keys) {
+        foreach((var f, var editor) in main.editors) {
             var str = Path.GetFileName(f);
-            
-            str = str.Length > Width ? str.Substring(0, Width) : str;
+
+            str = $"{(str.Length > Width - 1 ? str.Substring(0, Width - 1) : str)}{(editor.unsaved ? "*" : "")}";
             var cur = f == main.currentFile;
 
             if(y == yMouse) {
@@ -116,7 +125,8 @@ class TextEditor : SadConsole.Console {
         this.file = file;
         this.editor = editor;
 
-        s = new(File.ReadAllText(file));
+        var content = File.ReadAllText(file);
+        s = new(content);
         textChanged = true;
     }
 
@@ -124,15 +134,38 @@ class TextEditor : SadConsole.Console {
     public Dictionary<string, HashSet<Point>> buttons = new();
     public Dictionary<Point, string> labelField = new();
 
-
-
+    public DateTime lastChecked = DateTime.Now;
+    public DateTime lastSaved = DateTime.Now;
+    public DateTime lastChanged = DateTime.Now;
     public bool prevRightDown = false;
     public string hoveredLabel;
+    public bool unsaved;
+
+    public void CheckUnsaved() {
+        unsaved = File.GetLastWriteTime(file) > lastSaved || lastChanged > lastSaved;
+        lastChecked = DateTime.Now;
+    }
     public override void Update(TimeSpan delta) {
-        if(!textChanged) {
+        if (!textChanged) {
+            if ((DateTime.Now - lastChecked).TotalSeconds > 1) {
+                CheckUnsaved();
+
+                if(unsaved && File.ReadAllText(file).GetSHA256() == s.ToString().GetSHA256()) {
+                    unsaved = false;
+                    lastSaved = DateTime.Now;
+                }
+            }
             return;
         }
+        /*
+        if ((DateTime.Now - lastChecked).TotalSeconds > 0.25) {
+            
+        }
+        */
         textChanged = false;
+        lastChanged = DateTime.Now;
+
+        CheckUnsaved();
 
         buttons.Clear();
         labelField.Clear();
@@ -176,7 +209,7 @@ class TextEditor : SadConsole.Console {
         if(labelField.TryGetValue(state.SurfaceCellPosition, out var l)) {
             hoveredLabel = l;
 
-            var rightDown = state.Mouse.RightButtonDown;
+            var rightDown = state.Mouse.LeftButtonDown;
             if (prevRightDown && !rightDown) {
 
                 var m = Regex.Match(hoveredLabel, "(?<file>[^#]+)(#(?<section>.+))?");
@@ -187,6 +220,10 @@ class TextEditor : SadConsole.Console {
                 if (File.Exists(file)) {
                     editor.SetFile(file);
                     hoveredLabel = null;
+                } else {
+                    File.Create(file);
+                    editor.SetFile(file);
+                    hoveredLabel = null;
                 }
             }
             prevRightDown = rightDown;
@@ -195,11 +232,19 @@ class TextEditor : SadConsole.Console {
         }
         return base.ProcessMouse(state);
     }
+    public void Save() {
+        unsaved = false;
+        File.WriteAllText(file, s.ToString());
+        lastSaved = DateTime.Now;
+    }
     public override bool ProcessKeyboard(Keyboard keyboard) {
-        bool ctrl = keyboard.IsKeyDown(Keys.LeftControl);
+        bool ctrl = keyboard.IsKeyDown(Keys.LeftControl) || keyboard.IsKeyDown(Keys.RightControl);
 
         foreach(var k in keyboard.KeysPressed) {
             switch (k.Key) {
+                case Keys.S when ctrl:
+                    Save();
+                    break;
                 case Keys.Escape: {
                         break;
                     }
@@ -290,6 +335,7 @@ class TextEditor : SadConsole.Console {
                             }
                         }
                         columnMemory = CountColumn();
+                        textChanged = true;
                         break;
                     }
                 case Keys.Enter: {
@@ -306,6 +352,7 @@ class TextEditor : SadConsole.Console {
                             cursor += indent;
                         }
                         columnMemory = CountColumn();
+                        textChanged = true;
                         break;
                     }
                 case Keys.Tab: {
@@ -320,6 +367,7 @@ class TextEditor : SadConsole.Console {
                         }
                         cursor += 4;
                         columnMemory = CountColumn();
+                        textChanged = true;
                         break;
                     }
                 default: {
@@ -416,53 +464,58 @@ class TextEditor : SadConsole.Console {
         }
         return count;
     }
-    public override void Render(TimeSpan delta) {
 
+    List<ColoredString> buffer = new();
+    Dictionary<Point, int> selectField = new();
+    public void UpdateBuffer() {
         var back = new Color(0, 0, 0);
         var highlight = Color.Yellow;
         var fore = Color.White;
         var cursorSpace = new ColoredGlyph(back, highlight, ' ');
-        var buffer = new List<ColoredString>();
+        buffer.Clear();
+        selectField.Clear();
 
         int width = Width;
         var line = new ColoredString(width);
         int index = 0;
-        int length = 0;
+        int col = 0;
         foreach (var ch in s.ToString()) {
             if (ch == '\n') {
-                buffer.Add(line.SubString(0, length));
+                buffer.Add(line.SubString(0, col));
                 line = new(width);
                 if (cursor == index) {
                     buffer[buffer.Count - 1] += new ColoredString(cursorSpace);
                 }
                 index++;
-                length = 0;
+                col = 0;
                 continue;
             }
 
-            line[length] = 
+            line[col] =
                 index == cursor ?
                     new() { Foreground = back, Background = highlight, Glyph = ch } :
                     new() { Foreground = fore, Background = back, Glyph = ch };
             index++;
-            length++;
-            if (length == width) {
+            col++;
+            if (col == width) {
                 buffer.Add(line);
                 line = new(width);
-                length = 0;
+                col = 0;
             }
         }
-        if (length > 0) {
-            buffer.Add(line.SubString(0, length));
+        if (col > 0) {
+            buffer.Add(line.SubString(0, col));
         }
         if (index == cursor) {
-            if (length == 0) {
+            if (col == 0) {
                 buffer.Add(new(cursorSpace));
             } else {
                 buffer[buffer.Count - 1] += new ColoredString(cursorSpace);
             }
         }
-
+    }
+    public override void Render(TimeSpan delta) {
+        UpdateBuffer();
         var y = 0;
 
         this.Clear();

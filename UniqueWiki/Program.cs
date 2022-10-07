@@ -28,6 +28,7 @@ class EditorScreen : SadConsole.Console {
     public string currentFile;
     public Dictionary<string, TextEditor> editors=new();
     public EditorScreen(int w, int h) : base(w, h) {
+        DefaultBackground = new(51, 102, 102);
         ResetUI();
     }
     public void SetFile(string file) {
@@ -46,16 +47,18 @@ class EditorScreen : SadConsole.Console {
                 SetFile(t.text);
             }
         });
-        Children.Add(new NavMenu(16, Height-3, this) {
+        Children.Add(new NavMenu(16, Height-4, this) {
             Position = new(1, 3)
         });
         if(currentFile == null) {
 
         } else if (editors.TryGetValue(currentFile, out var te)) {
             Children.Add(te);
+            te.IsFocused = true;
         } else {
-            Children.Add(editors[currentFile] = new(Width - 20, Height - 3, currentFile, this) {
-                Position = new(20, 3)
+            Children.Add(editors[currentFile] = new(Width - 21, Height - 4, currentFile, this) {
+                Position = new(20, 3),
+                IsFocused = true
             });
         }
     }
@@ -67,12 +70,13 @@ class NavMenu : SadConsole.Console {
     public NavMenu(int w, int h, EditorScreen editor) : base(w, h) {
         this.main = editor;
         FocusOnMouseClick = true;
+        DefaultBackground = new(40, 75, 102);
     }
     int yMouse;
     bool prevMouseDown;
     public override bool ProcessMouse(MouseScreenObjectState state) {
 
-        if (state.IsOnScreenObject) {
+        if (IsMouseOver) {
             yMouse = state.SurfaceCellPosition.Y;
 
             var mouseDown = state.Mouse.LeftButtonDown;
@@ -95,7 +99,7 @@ class NavMenu : SadConsole.Console {
             str = $"{(str.Length > Width - 1 ? str.Substring(0, Width - 1) : str)}{(editor.unsaved ? "*" : "")}";
             var cur = f == main.currentFile;
 
-            if(y == yMouse) {
+            if(y == yMouse && IsMouseOver) {
                 if(prevMouseDown) {
                     this.Print(0, y++, str, Color.Black, Color.Yellow);
                 } else {
@@ -121,7 +125,7 @@ class TextEditor : SadConsole.Console {
     public TextEditor(int w, int h, string file, EditorScreen editor) : base(w, h) {
         UseKeyboard = true;
         FocusOnMouseClick = true;
-        DefaultBackground = Color.Black;
+        DefaultBackground = new(40, 75, 102);
         this.file = file;
         this.editor = editor;
 
@@ -146,27 +150,31 @@ class TextEditor : SadConsole.Console {
         lastChecked = DateTime.Now;
     }
     public override void Update(TimeSpan delta) {
-        if (!textChanged) {
+        if (textChanged) {
+
+            textChanged = false;
+            lastChanged = DateTime.Now;
+            CheckUnsaved();
+            Refresh();
+        } else {
             if ((DateTime.Now - lastChecked).TotalSeconds > 1) {
                 CheckUnsaved();
 
-                if(unsaved && File.ReadAllText(file).GetSHA256() == raw.ToString().GetSHA256()) {
+                if (unsaved && File.ReadAllText(file).GetSHA256() == raw.ToString().GetSHA256()) {
                     unsaved = false;
                     lastSaved = DateTime.Now;
                 }
             }
-            return;
-        }
-        /*
-        if ((DateTime.Now - lastChecked).TotalSeconds > 0.25) {
-            
-        }
-        */
-        textChanged = false;
-        lastChanged = DateTime.Now;
 
-        CheckUnsaved();
-
+            if (needRefresh) {
+                Refresh();
+            }
+        }
+        
+        base.Update(delta);
+    }
+    public void Refresh() {
+        needRefresh = false;
         hoveredLink = null;
         links.Clear();
         linkMap.Clear();
@@ -179,7 +187,7 @@ class TextEditor : SadConsole.Console {
         printed.Clear();
 
         int i = 0;
-        while(i < raw.Length) {
+        while (i < raw.Length) {
             var c = raw[i];
             if (c == '\n') {
                 printed.Append(c);
@@ -189,12 +197,12 @@ class TextEditor : SadConsole.Console {
                 continue;
             }
 
-            if (c == '[' && Regex.Match(raw.ToString().Substring(i), "\\[\\[(?<link>[^\\|\\[\\]]+)(\\|(?<label>[^\\]]+))?\\]\\]") is Match {Success:true } m) {
+            if (c == '[' && Regex.Match(raw.ToString().Substring(i), "\\[\\[(?<link>[^\\|\\[\\]]+)(\\|(?<label>[^\\]]+))?\\]\\]") is Match { Success: true } m) {
                 var link = m.Groups["link"].Value;
                 var label = m.Groups["label"].Value;
                 var buttonPoints = new HashSet<Point>();
                 string visible;
-                if(label.Length > 0) {
+                if (label.Length > 0) {
                     var l = link.Length;
                     if (cursorRawIndex >= i + 2) {
                         if (cursorRawIndex < i + 2 + l + 1 + 1) {
@@ -227,13 +235,13 @@ class TextEditor : SadConsole.Console {
             col++;
             i++;
         }
-        base.Update(delta);
     }
     public override bool ProcessMouse(MouseScreenObjectState state) {
-        if(linkMap.TryGetValue(state.SurfaceCellPosition, out var l)) {
+
+        var rightDown = state.Mouse.LeftButtonDown;
+        if (linkMap.TryGetValue(state.SurfaceCellPosition, out var l)) {
             hoveredLink = l;
 
-            var rightDown = state.Mouse.LeftButtonDown;
             if (prevRightDown && !rightDown) {
 
                 var m = Regex.Match(hoveredLink, "(?<file>[^#]+)(#(?<section>.+))?");
@@ -250,10 +258,11 @@ class TextEditor : SadConsole.Console {
                     hoveredLink = null;
                 }
             }
-            prevRightDown = rightDown;
         } else {
             hoveredLink = null;
         }
+
+        prevRightDown = rightDown;
         return base.ProcessMouse(state);
     }
     public void Save() {
@@ -300,7 +309,7 @@ class TextEditor : SadConsole.Console {
                             }
                         }
                         columnMemory = CountColumn();
-                        textChanged = true;
+                        needRefresh = true;
                         break;
                     }
                 case Keys.Right: {
@@ -312,7 +321,7 @@ class TextEditor : SadConsole.Console {
                             cursorRawIndex++;
                         }
                         columnMemory = CountColumn();
-                        textChanged = true;
+                        needRefresh = true;
                         break;
                     }
                 case Keys.Up: {
@@ -322,7 +331,7 @@ class TextEditor : SadConsole.Console {
                         } else {
                             cursorRawIndex = 0;
                         }
-                        textChanged = true;
+                        needRefresh = true;
                         break;
                     }
                 case Keys.Down: {
@@ -332,7 +341,7 @@ class TextEditor : SadConsole.Console {
                         } else {
                             cursorRawIndex = raw.Length;
                         }
-                        textChanged = true;
+                        needRefresh = true;
                         break;
                     }
                 case Keys.Back: {
@@ -497,7 +506,7 @@ class TextEditor : SadConsole.Console {
     Dictionary<Point, int> selectField = new();
     public void UpdateBuffer() {
         var back = new Color(0, 0, 0);
-        var highlight = Color.Yellow;
+        var highlight = IsFocused ? Color.Yellow : new Color(153, 153, 153);
         var fore = Color.White;
         var cursorSpace = new ColoredGlyph(back, highlight, ' ');
         buffer.Clear();
@@ -507,6 +516,7 @@ class TextEditor : SadConsole.Console {
         var line = new ColoredString(width);
         int index = 0;
         int col = 0;
+        int row = 0;
         foreach (var ch in printed.ToString()) {
             if (ch == '\n') {
                 buffer.Add(line.SubString(0, col));
@@ -516,13 +526,16 @@ class TextEditor : SadConsole.Console {
                 }
                 index++;
                 col = 0;
+                row++;
                 continue;
             }
 
             line[col] =
                 index == cursorVisibleIndex ?
                     new() { Foreground = back, Background = highlight, Glyph = ch } :
-                    new() { Foreground = fore, Background = back, Glyph = ch };
+                linkMap.ContainsKey(new(col, row)) ?
+                    new() { Foreground = new(204, 255, 255), Background = back, Glyph = ch } :
+                new() { Foreground = fore, Background = back, Glyph = ch };
             index++;
             col++;
             if (col == width) {
@@ -534,7 +547,7 @@ class TextEditor : SadConsole.Console {
         if (col > 0) {
             buffer.Add(line.SubString(0, col));
         }
-        if (index == cursorVisibleIndex) {
+        if (index == cursorVisibleIndex && IsFocused) {
             if (col == 0) {
                 buffer.Add(new(cursorSpace));
             } else {

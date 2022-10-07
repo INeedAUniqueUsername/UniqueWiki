@@ -114,8 +114,8 @@ class NavMenu : SadConsole.Console {
 class TextEditor : SadConsole.Console {
 
     public string file;
-    public int cursor, columnMemory;
-    public StringBuilder s = new();
+    public int cursorRawIndex, cursorVisibleIndex, columnMemory;
+    public StringBuilder raw = new(), printed = new();
 
     EditorScreen editor;
     public TextEditor(int w, int h, string file, EditorScreen editor) : base(w, h) {
@@ -126,19 +126,19 @@ class TextEditor : SadConsole.Console {
         this.editor = editor;
 
         var content = File.ReadAllText(file);
-        s = new(content);
+        raw = new(content);
         textChanged = true;
     }
 
-    public bool textChanged = false;
-    public Dictionary<string, HashSet<Point>> buttons = new();
-    public Dictionary<Point, string> buttonMap = new();
+    public bool textChanged = false, needRefresh = false;
+    public Dictionary<string, HashSet<Point>> links = new();
+    public Dictionary<Point, string> linkMap = new();
 
     public DateTime lastChecked = DateTime.Now;
     public DateTime lastSaved = DateTime.Now;
     public DateTime lastChanged = DateTime.Now;
     public bool prevRightDown = false;
-    public string hoveredLabel;
+    public string hoveredLink;
     public bool unsaved;
 
     public void CheckUnsaved() {
@@ -150,7 +150,7 @@ class TextEditor : SadConsole.Console {
             if ((DateTime.Now - lastChecked).TotalSeconds > 1) {
                 CheckUnsaved();
 
-                if(unsaved && File.ReadAllText(file).GetSHA256() == s.ToString().GetSHA256()) {
+                if(unsaved && File.ReadAllText(file).GetSHA256() == raw.ToString().GetSHA256()) {
                     unsaved = false;
                     lastSaved = DateTime.Now;
                 }
@@ -167,91 +167,98 @@ class TextEditor : SadConsole.Console {
 
         CheckUnsaved();
 
-        buttons.Clear();
-        buttonMap.Clear();
+        hoveredLink = null;
+        links.Clear();
+        linkMap.Clear();
+
+        cursorVisibleIndex = cursorRawIndex;
 
         int row = 0;
         int col = 0;
 
+        printed.Clear();
 
         int i = 0;
-        while(i < s.Length) {
-            var c = s[i];
+        while(i < raw.Length) {
+            var c = raw[i];
             if (c == '\n') {
+                printed.Append(c);
                 col = 0;
                 row++;
                 i++;
                 continue;
             }
 
-            if (c == '[') {
-                var label = new StringBuilder();
+            if (c == '[' && Regex.Match(raw.ToString().Substring(i), "\\[\\[(?<link>[^\\|\\[\\]]+)(\\|(?<label>[^\\]]+))?\\]\\]") is Match {Success:true } m) {
+                var link = m.Groups["link"].Value;
+                var label = m.Groups["label"].Value;
                 var buttonPoints = new HashSet<Point>();
-
-                buttonPoints.Add(new(col, row));
-                col++; 
-                i++;
-                while(i < s.Length) {
-                    c = s[i];
-                    if(c == '\n') {
-                        label.Append(c);
-                        col = 0;
-                        row++;
-                        i++;
-                        continue;
-                    }
-                    if (c == ']') {
-                        var l = label.ToString();
-                        buttons[l] = buttonPoints;
-                        foreach (var p in buttonPoints) {
-                            buttonMap[p] = l;
+                string visible;
+                if(label.Length > 0) {
+                    var l = link.Length;
+                    if (cursorRawIndex >= i + 2) {
+                        if (cursorRawIndex < i + 2 + l + 1 + 1) {
+                            visible = m.Value;
+                        } else {
+                            cursorVisibleIndex -= l + 1;
+                            visible = $"[[{label}]]";
                         }
-                        buttonPoints.Add(new(col, row));
-                        break;
+                    } else {
+                        visible = $"[[{label}]]";
                     }
-
-                    label.Append(c);
-
+                } else {
+                    visible = $"[[{link}]]";
+                }
+                foreach (var ch in visible) {
+                    //to do: handle newlines
+                    printed.Append(ch);
                     buttonPoints.Add(new(col, row));
                     col++;
-                    i++;
                 }
+                links[link] = buttonPoints;
+                foreach (var p in buttonPoints) {
+                    linkMap[p] = link;
+                }
+                i += m.Length;
+                continue;
             }
+
+            printed.Append(c);
             col++;
             i++;
         }
         base.Update(delta);
     }
     public override bool ProcessMouse(MouseScreenObjectState state) {
-        if(buttonMap.TryGetValue(state.SurfaceCellPosition, out var l)) {
-            hoveredLabel = l;
+        if(linkMap.TryGetValue(state.SurfaceCellPosition, out var l)) {
+            hoveredLink = l;
 
             var rightDown = state.Mouse.LeftButtonDown;
             if (prevRightDown && !rightDown) {
 
-                var m = Regex.Match(hoveredLabel, "(?<file>[^#]+)(#(?<section>.+))?");
+                var m = Regex.Match(hoveredLink, "(?<file>[^#]+)(#(?<section>.+))?");
                 var file = m.Groups["file"].Value;
                 var section = m.Groups["section"].Value;
 
                 file = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(this.file), file));
                 if (File.Exists(file)) {
                     editor.SetFile(file);
-                    hoveredLabel = null;
+                    hoveredLink = null;
                 } else {
                     File.Create(file);
                     editor.SetFile(file);
-                    hoveredLabel = null;
+                    hoveredLink = null;
                 }
             }
             prevRightDown = rightDown;
         } else {
-            hoveredLabel = null;
+            hoveredLink = null;
         }
         return base.ProcessMouse(state);
     }
     public void Save() {
         unsaved = false;
-        File.WriteAllText(file, s.ToString());
+        File.WriteAllText(file, raw.ToString());
         lastSaved = DateTime.Now;
     }
     public override bool ProcessKeyboard(Keyboard keyboard) {
@@ -268,87 +275,91 @@ class TextEditor : SadConsole.Console {
                 case Keys.Home: {
                     Home:
                         if (FindPrevLine(out int index)) {
-                            cursor = index;
+                            cursorRawIndex = index;
                         } else {
-                            cursor = 0;
+                            cursorRawIndex = 0;
                         }
                         columnMemory = CountColumn();
                         break;
                     }
                 case Keys.End: {
                         if (FindNextLine(out int index)) {
-                            cursor = index;
+                            cursorRawIndex = index;
                         } else {
-                            cursor = 0;
+                            cursorRawIndex = 0;
                         }
                         columnMemory = CountColumn();
                         break;
                     }
                 case Keys.Left: {
                     LeftArrow:
-                        if (cursor > 0) {
-                            cursor--;
-                            if (ctrl && s[cursor] != ' ') {
+                        if (cursorRawIndex > 0) {
+                            cursorRawIndex--;
+                            if (ctrl && raw[cursorRawIndex] != ' ') {
                                 goto LeftArrow;
                             }
                         }
                         columnMemory = CountColumn();
+                        textChanged = true;
                         break;
                     }
                 case Keys.Right: {
                     RightArrow:
-                        if (cursor < s.Length - 1 && ctrl && s[cursor + 1] != ' ') {
-                            cursor++;
+                        if (cursorRawIndex < raw.Length - 1 && ctrl && raw[cursorRawIndex + 1] != ' ') {
+                            cursorRawIndex++;
                             goto RightArrow;
-                        } else if (cursor < s.Length) {
-                            cursor++;
+                        } else if (cursorRawIndex < raw.Length) {
+                            cursorRawIndex++;
                         }
                         columnMemory = CountColumn();
+                        textChanged = true;
                         break;
                     }
                 case Keys.Up: {
                         if (FindPrevLine(out int index)) {
                             int column = Math.Min(columnMemory, CountLineLength(index));
-                            cursor = index + column;
+                            cursorRawIndex = index + column;
                         } else {
-                            cursor = 0;
+                            cursorRawIndex = 0;
                         }
+                        textChanged = true;
                         break;
                     }
                 case Keys.Down: {
                         if (FindNextLine(out int index)) {
                             int column = Math.Min(columnMemory, CountLineLength(index));
-                            cursor = index + column;
+                            cursorRawIndex = index + column;
                         } else {
-                            cursor = s.Length;
+                            cursorRawIndex = raw.Length;
                         }
+                        textChanged = true;
                         break;
                     }
                 case Keys.Back: {
-
+                        hoveredLink = null;
                         //Global.Break();
                         if (ctrl) {
                             //Make sure we have characters to delete
-                            if (cursor == 0) {
+                            if (cursorRawIndex == 0) {
                                 break;
                             }
                             //If we are at a space, just delete it
-                            if (s[cursor - 1] == ' ') {
-                                cursor--;
-                                s.Remove(cursor, 1);
+                            if (raw[cursorRawIndex - 1] == ' ') {
+                                cursorRawIndex--;
+                                raw.Remove(cursorRawIndex, 1);
                             } else {
                                 //Otherwise, delete characters until we reach a space
                                 int length = 0;
-                                while (cursor > 0 && s[cursor - 1] != ' ') {
-                                    cursor--;
+                                while (cursorRawIndex > 0 && raw[cursorRawIndex - 1] != ' ') {
+                                    cursorRawIndex--;
                                     length++;
                                 }
-                                s.Remove(cursor, length);
+                                raw.Remove(cursorRawIndex, length);
                             }
                         } else {
-                            if (s.Length > 0 && cursor > 0) {
-                                cursor--;
-                                s.Remove(cursor, 1);
+                            if (raw.Length > 0 && cursorRawIndex > 0) {
+                                cursorRawIndex--;
+                                raw.Remove(cursorRawIndex, 1);
                             }
                         }
                         columnMemory = CountColumn();
@@ -357,16 +368,16 @@ class TextEditor : SadConsole.Console {
                     }
                 case Keys.Enter: {
 
-                        if (cursor == s.Length) {
+                        if (cursorRawIndex == raw.Length) {
                             int indent = CountIndent();
-                            s.Append("\n" + new string(' ', indent));
-                            cursor++;
-                            cursor += indent;
+                            raw.Append("\n" + new string(' ', indent));
+                            cursorRawIndex++;
+                            cursorRawIndex += indent;
                         } else {
                             int indent = CountIndent();
-                            s.Insert(cursor, "\n" + new string(' ', indent));
-                            cursor++;
-                            cursor += indent;
+                            raw.Insert(cursorRawIndex, "\n" + new string(' ', indent));
+                            cursorRawIndex++;
+                            cursorRawIndex += indent;
                         }
                         columnMemory = CountColumn();
                         textChanged = true;
@@ -377,12 +388,12 @@ class TextEditor : SadConsole.Console {
                         if (ctrl) {
                             break;
                         }
-                        if (cursor == s.Length) {
-                            s.Append("    ");
+                        if (cursorRawIndex == raw.Length) {
+                            raw.Append("    ");
                         } else {
-                            s.Insert(cursor, "    ");
+                            raw.Insert(cursorRawIndex, "    ");
                         }
-                        cursor += 4;
+                        cursorRawIndex += 4;
                         columnMemory = CountColumn();
                         textChanged = true;
                         break;
@@ -394,12 +405,12 @@ class TextEditor : SadConsole.Console {
                         }
 
                         if (k.Character != 0) {
-                            if (cursor == s.Length) {
-                                s.Append(k.Character);
+                            if (cursorRawIndex == raw.Length) {
+                                raw.Append(k.Character);
                             } else {
-                                s.Insert(cursor, k.Character);
+                                raw.Insert(cursorRawIndex, k.Character);
                             }
-                            cursor++;
+                            cursorRawIndex++;
                             columnMemory = CountColumn();
                             textChanged = true;
                         }
@@ -412,18 +423,18 @@ class TextEditor : SadConsole.Console {
     }
     int CountColumn() {
         int count = 0;
-        int index = cursor - 1;
-        while (index > -1 && s[index] != '\n') {
+        int index = cursorRawIndex - 1;
+        while (index > -1 && raw[index] != '\n') {
             index--;
             count++;
         }
         return count;
     }
     int CountIndent() {
-        int index = cursor - 1;
+        int index = cursorRawIndex - 1;
         int indent = 0;
         while (index > -1) {
-            switch (s[index]) {
+            switch (raw[index]) {
                 case ' ':
                     indent++;
                     break;
@@ -438,11 +449,11 @@ class TextEditor : SadConsole.Console {
         return indent;
     }
     bool FindPrevLine(out int index) {
-        index = Math.Min(cursor, s.Length - 1);
+        index = Math.Min(cursorRawIndex, raw.Length - 1);
         if (index > -1) {
             index--;
         }
-        while (index > -1 && s[index] != '\n') {
+        while (index > -1 && raw[index] != '\n') {
             index--;
         }
         if (index == -1) {
@@ -450,22 +461,22 @@ class TextEditor : SadConsole.Console {
         }
         index--;
 
-        while (index > -1 && s[index] != '\n') {
+        while (index > -1 && raw[index] != '\n') {
             index--;
         }
         index++;
         return true;
     }
     bool FindNextLine(out int index) {
-        if (s.Length == 0) {
+        if (raw.Length == 0) {
             index = 0;
             return false;
         }
-        index = Math.Min(cursor, s.Length - 1);
-        while (index < s.Length && s[index] != '\n') {
+        index = Math.Min(cursorRawIndex, raw.Length - 1);
+        while (index < raw.Length && raw[index] != '\n') {
             index++;
         }
-        if (index != s.Length) {
+        if (index != raw.Length) {
             //Return index of first char of line
             index++;
             return true;
@@ -475,7 +486,7 @@ class TextEditor : SadConsole.Console {
     }
     int CountLineLength(int index) {
         int count = 0;
-        while (index < s.Length && s[index] != '\n') {
+        while (index < raw.Length && raw[index] != '\n') {
             index++;
             count++;
         }
@@ -496,11 +507,11 @@ class TextEditor : SadConsole.Console {
         var line = new ColoredString(width);
         int index = 0;
         int col = 0;
-        foreach (var ch in s.ToString()) {
+        foreach (var ch in printed.ToString()) {
             if (ch == '\n') {
                 buffer.Add(line.SubString(0, col));
                 line = new(width);
-                if (cursor == index) {
+                if (cursorVisibleIndex == index) {
                     buffer[buffer.Count - 1] += new ColoredString(cursorSpace);
                 }
                 index++;
@@ -509,7 +520,7 @@ class TextEditor : SadConsole.Console {
             }
 
             line[col] =
-                index == cursor ?
+                index == cursorVisibleIndex ?
                     new() { Foreground = back, Background = highlight, Glyph = ch } :
                     new() { Foreground = fore, Background = back, Glyph = ch };
             index++;
@@ -523,7 +534,7 @@ class TextEditor : SadConsole.Console {
         if (col > 0) {
             buffer.Add(line.SubString(0, col));
         }
-        if (index == cursor) {
+        if (index == cursorVisibleIndex) {
             if (col == 0) {
                 buffer.Add(new(cursorSpace));
             } else {
@@ -540,15 +551,15 @@ class TextEditor : SadConsole.Console {
             this.Print(0, y++, l);
         }
 
-        if(hoveredLabel != null) {
+        if(hoveredLink != null) {
             if (prevRightDown) {
-                foreach (var p in buttons[hoveredLabel]) {
+                foreach (var p in links[hoveredLink]) {
                     this.SetForeground(p.X, p.Y, Color.Black);
                     this.SetBackground(p.X, p.Y, Color.White);
 
                 }
             } else {
-                foreach (var p in buttons[hoveredLabel]) {
+                foreach (var p in links[hoveredLink]) {
                     this.SetBackground(p.X, p.Y, new Color(102, 102, 102));
                 }
             }

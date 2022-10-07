@@ -132,7 +132,7 @@ class TextEditor : SadConsole.Console {
 
     public bool textChanged = false;
     public Dictionary<string, HashSet<Point>> buttons = new();
-    public Dictionary<Point, string> labelField = new();
+    public Dictionary<Point, string> buttonMap = new();
 
     public DateTime lastChecked = DateTime.Now;
     public DateTime lastSaved = DateTime.Now;
@@ -168,45 +168,62 @@ class TextEditor : SadConsole.Console {
         CheckUnsaved();
 
         buttons.Clear();
-        labelField.Clear();
+        buttonMap.Clear();
 
         int row = 0;
         int col = 0;
 
-        StringBuilder label = null;
-        HashSet<Point> labelPoints = new();
-        foreach(var c in s.ToString()) {
-            if(c == '\n') {
+
+        int i = 0;
+        while(i < s.Length) {
+            var c = s[i];
+            if (c == '\n') {
                 col = 0;
                 row++;
+                i++;
                 continue;
             }
-            
-            if(c == '[') {
-                label = new();
-                labelPoints = new();
-                labelPoints.Add(new(col, row));
-            } else if(c == ']') {
-                if(label != null) {
-                    labelPoints.Add(new(col, row));
 
-                    var l = label.ToString();
-                    buttons[l] = labelPoints;
-                    foreach(var p in labelPoints) {
-                        labelField[p] = l;
+            if (c == '[') {
+                var label = new StringBuilder();
+                var buttonPoints = new HashSet<Point>();
+
+                buttonPoints.Add(new(col, row));
+                col++; 
+                i++;
+                while(i < s.Length) {
+                    c = s[i];
+                    if(c == '\n') {
+                        label.Append(c);
+                        col = 0;
+                        row++;
+                        i++;
+                        continue;
                     }
+                    if (c == ']') {
+                        var l = label.ToString();
+                        buttons[l] = buttonPoints;
+                        foreach (var p in buttonPoints) {
+                            buttonMap[p] = l;
+                        }
+                        buttonPoints.Add(new(col, row));
+                        break;
+                    }
+
+                    label.Append(c);
+
+                    buttonPoints.Add(new(col, row));
+                    col++;
+                    i++;
                 }
-                label = null;
-            } else if(label != null) {
-                label.Append(c);
-                labelPoints.Add(new(col, row));
             }
             col++;
+            i++;
         }
         base.Update(delta);
     }
     public override bool ProcessMouse(MouseScreenObjectState state) {
-        if(labelField.TryGetValue(state.SurfaceCellPosition, out var l)) {
+        if(buttonMap.TryGetValue(state.SurfaceCellPosition, out var l)) {
             hoveredLabel = l;
 
             var rightDown = state.Mouse.LeftButtonDown;
